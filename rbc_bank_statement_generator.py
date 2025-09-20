@@ -2,6 +2,8 @@
 import pandas as pd
 import sys
 import random
+import os
+import tempfile
 from datetime import datetime, timedelta
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import LETTER, letter
@@ -14,7 +16,8 @@ import traceback
 # Configuration
 INPUT_FILE = "template/BrightDesk_Consulting_Ledger_Mar2022_to_Aug2025_v11.xlsx"
 OUTPUT_DIR = "statements/"
-TEMPLATE_PDF = "template/rbc_banktemplate_V1_printed.pdf"
+TRANSACTIONS_DIR = "transactions/"
+TEMPLATE_PDF = "template/rbc_banktemplate.pdf"
 
 #company details
 COMPANY_NAME = "BrightDesk Consulting"
@@ -43,7 +46,7 @@ templates = {
         second_account_number_x_coord= 158,
         second_account_number_y_coord= 319,
         opening_balance_ending_x_coord= 370,
-        opening_balance_y_coord= 319,
+        opening_balance_y_coord= 367,
         closing_balance_x_coord= 370,
         closing_balance_ending_y_coord= 420,
         total_deposits_x_coord= 370,     
@@ -59,18 +62,26 @@ def load_data(file_path):
     print(f"Loading data from {file_path}...")
     return pd.read_excel(file_path, sheet_name='chequing')
 
-def create_first_page(opening_balance, account_info, beginning_date, closing_date, total_deposits, total_withdrawls, company_name, street_address, city, province, postal_code):
+def create_first_page(canvas, opening_balance, account_info, beginning_date, closing_date, total_deposits, total_withdrawls, company_name, street_address, city, province, postal_code):
     #create the first page of the bank statement
     template = templates["rbc"]
     month_year = beginning_date.strftime("%B %Y")
     overlay_pdf = f"first_page_{month_year}.pdf"
-    c = canvas.Canvas(overlay_pdf, pagesize=letter)
+    c = canvas
     width, height = letter
     c.setFont("Helvetica-Bold", 12)
-    c.drawRightString(template.address_x_coord, template.company_name_y_coord, company_name)
-    c.drawRightString(template.address_x_coord, template.street_address_y_coord, street_address)
-    c.drawRightString(template.address_x_coord, template.city_province_state_country_y_coord, city + "," + province)
-    c.drawRightString(template.postal_code_x_coord, template.postal_code_y_coord, postal_code)
+    c.drawString(template.address_x_coord, height - template.company_name_y_coord, company_name)
+    c.drawString(template.address_x_coord, height - template.street_address_y_coord, street_address)
+    c.drawString(template.address_x_coord, height - template.city_province_state_country_y_coord, city + "," + province)
+    c.drawString(template.postal_code_x_coord, height - template.postal_code_y_coord, postal_code)
+    c.drawRightString(template.account_number_ending_x_coord, height - template.account_number_y_coord, account_info)
+    c.drawRightString(template.second_account_number_x_coord, height - template.second_account_number_y_coord, account_info)
+    c.setFont("Helvetica", 10)
+    c.drawRightString(template.opening_balance_ending_x_coord, height - template.opening_balance_y_coord, f"${opening_balance:,.2f}")
+    c.drawRightString(template.total_deposits_x_coord, height - template.total_deposits_y_coord, f"${total_deposits:,.2f}")
+    c.drawRightString(template.total_withdrawals_x_coord, height - template.total_withdrawals_y_coord, f"${total_withdrawls:,.2f}")
+    c.setFont("Helvetica-Bold", 10)
+    c.drawRightString(template.closing_balance_x_coord, height - template.closing_balance_ending_y_coord, f"${opening_balance - total_withdrawls + total_deposits:,.2f}")
 
     return overlay_pdf
 
@@ -166,8 +177,8 @@ def make_transaction_table(transactions, colWidths):
         ('LINEABOVE', (0, 0), (-1, -1), 0, colors.white),
         ('LINEBEFORE', (0, 0), (-1, -1), 0, colors.white),
         ('LINEAFTER', (0, 0), (-1, -1), 0, colors.white),
-        ('LINEBELOW', (0, 0), (-1, 0), 1, colors.black, None, (3, 3)),
-        ('VALIGN', (1, 0), (1, 0), 'TOP'),
+        # Add dashed bottom line for each row
+        ('LINEBELOW', (0, 0), (-1, -1), 1, colors.black, None, (1, 2)),
         ('LEFTPADDING', (0, 0), (-1, -1), 6),
         ('RIGHTPADDING', (0, 0), (-1, -1), 6),
         ('TOPPADDING', (0, 0), (-1, -1), 6),
@@ -196,70 +207,114 @@ def generate_statement(data, month, year):
     account_info = company_info["account_number"]
     postal_code = company_info["postal_code"]
 
-    create_first_page(opening_balance, account_info, beginning_date, closing_date, total_deposits, total_withdrawls, company_name, street_address, city, province, postal_code)
     line_height = 10
     colWidths = [95-47,  320-95, 60, 90, 122]
     balance = opening_balance
 
-    # Start with header and opening balance row
-    header = ["Date", "Payee", "Credit", "Debit", "Balance"]
+    # Month abbreviations mapping
+    month_abbr = {
+        1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr', 5: 'May', 6: 'Jun',
+        7: 'Jul', 8: 'Aug', 9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'
+    }
+
+    # Reset statement-specific variables
+    is_first_page_of_statement = True  # Reset for new statement
+    row_counter = 1
     transactions = [
-        header,
         ["", "Opening Balance", "", "", opening_balance]
     ]
+    last_date = None
 
-    overlay_pdf = f"transactions_{year}_{month:02d}_.pdf"
+    # Create temporary file for overlay PDF
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
+        overlay_pdf = temp_file.name
+
     c = canvas.Canvas(overlay_pdf, pagesize=letter)
-    row_counter = 2  # header + opening balance
-    first_page = True
+    create_first_page(c, opening_balance, account_info, beginning_date, closing_date, total_deposits, total_withdrawls, company_name, street_address, city, province, postal_code)
+
 
     for _, row in data.iterrows():
         balance = balance - row['Credit'] + row['Debit']
-        transaction = [row['Date'].strftime("%m-%d"), row['Payee'], row['Credit'], row['Debit'], balance]
+        
+        # Format date as "Day Mon" (e.g., "15 Feb")
+        current_date = row['Date']
+        date_str = f"{current_date.day} {month_abbr[current_date.month]}"
+        
+        # Only show date if it's different from the last date
+        if last_date is None or current_date.date() != last_date.date():
+            display_date = date_str
+            last_date = current_date
+        else:
+            display_date = ""
+        
+        transaction = [display_date, row['Payee'], row['Credit'], row['Debit'], balance]
         transactions.append(transaction)
         row_counter += 1
 
-        if (first_page and row_counter == 12) or (not first_page and row_counter == 22):
-            # Only draw if there is at least one data row (header + 1)
-            if len(transactions) > 2 and all(len(r) == 5 for r in transactions):
+        if (is_first_page_of_statement and row_counter == 9) or (not is_first_page_of_statement and row_counter == 22):
+            # Only draw if there is at least one data row
+            if len(transactions) > 0 and all(len(r) == 5 for r in transactions):
                 table = make_transaction_table(transactions, colWidths)
                 # Calculate table dimensions before drawing
-                available_width = letter[0] - 90  # leave margins
-                available_height = letter[1] - 200  # leave space for header/footer
-                table.wrap(available_width, available_height)
-                y_pos = letter[1] - 738 if first_page else letter[1] - 179
-                table.drawOn(c, 45, y_pos)
-            first_page = False
-            row_counter = 1  # reset for new page, header will be added
-            transactions = [header]  # start new page with header
+                available_width = letter[0]   # leave margins
+                available_height = letter[1] # leave space for header/footer
+                table_width, table_height = table.wrapOn(c,available_width, available_height)
+                y_pos = letter[1] - 498 - table_height if is_first_page_of_statement else letter[1] - 210 - table_height
+                x_pos = 45 if is_first_page_of_statement else 28
+                table.drawOn(c, x_pos, y_pos)
+                print('Drew table with {} rows, on y postiion: {}, is first page:{}'.format(len(transactions), y_pos, is_first_page_of_statement))
+                print("Height, width of page: {}, {}".format(letter[1], letter[0]))
+            
+            if not is_first_page_of_statement:
+                c.showPage()
+            is_first_page_of_statement = False
+            row_counter = 0  # reset for new page
+            transactions = []  # start new page with empty transactions
+            last_date = None  # reset date tracking for new page
 
-    # Draw any remaining transactions (must have header + at least 1 data row)
-    if len(transactions) > 1 and all(len(r) == 5 for r in transactions):
+    # Add closing balance row
+    transactions.append(["", "Closing Balance", "", "", closing_balance])
+    row_counter += 1
+
+    # Draw any remaining transactions
+    if len(transactions) > 0 and all(len(r) == 5 for r in transactions):
         table = make_transaction_table(transactions, colWidths)
         # Calculate table dimensions before drawing
-        available_width = letter[0] - 90  # leave margins
-        available_height = letter[1] - 200  # leave space for header/footer
-        table.wrap(available_width, available_height)
-        y_pos = letter[1] - 738 if first_page else letter[1] - 179
-        if not first_page:
+        available_width = letter[0]   # leave margins
+        available_height = letter[1]  # leave space for header/footer
+        table_width, table_height = table.wrapOn(c, available_width, available_height)
+        y_pos = letter[1] - 498 - table_height if is_first_page_of_statement else letter[1] - 210 - table_height
+        if not is_first_page_of_statement:
             c.showPage()
-        table.drawOn(c, 45, y_pos)
+        x_pos = 45 if is_first_page_of_statement else 28
+        table.drawOn(c, x_pos, y_pos)
+        print('Remaining: Drew table with {} rows, on y postiion: {}, is first page:{}'.format(len(transactions), y_pos, is_first_page_of_statement))
+        print("Height, width of page: {}, {}".format(letter[1], letter[0]))
+
 
     c.save()    
-    # Merge overlay with template
-    template_pdf = PdfReader(TEMPLATE_PDF)
-    overlay_pdf_reader = PdfReader(overlay_pdf)
-    writer = PdfWriter()
-    for page_num in range(len(overlay_pdf_reader.pages)):
-        template_page = template_pdf.pages[0] if page_num == 0 else template_pdf.pages[1]
-        overlay_page = overlay_pdf_reader.pages[page_num]
-        template_page.merge_page(overlay_page)
-        writer.add_page(template_page)
+    
+    try:
+        # Merge overlay with template
+        template_pdf = PdfReader(TEMPLATE_PDF)
+        overlay_pdf_reader = PdfReader(overlay_pdf)
+        writer = PdfWriter()
+        for page_num in range(len(overlay_pdf_reader.pages)):
+            template_page = template_pdf.pages[0] if page_num == 0 else template_pdf.pages[1]
+            overlay_page = overlay_pdf_reader.pages[page_num]
+            template_page.merge_page(overlay_page)
+            writer.add_page(template_page)
 
-    output_pdf = f"{OUTPUT_DIR}RBC_Statement_{year}_{month:02d}.pdf"
-    with open(output_pdf, "wb") as f:
-        writer.write(f)
-
+        output_pdf = f"{OUTPUT_DIR}RBC_Statement_{year}_{month:02d}.pdf"
+        with open(output_pdf, "wb") as f:
+            writer.write(f)
+            
+    finally:
+        # Clean up temporary file
+        try:
+            os.unlink(overlay_pdf)
+        except OSError:
+            pass  # File might already be deleted
 def main():
     """Main function."""
     try:
